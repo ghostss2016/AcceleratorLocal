@@ -35,3 +35,16 @@ for task in MMSPlugin.binaries:
     pdb_list.append(task.debug)
 
 builder.AddCopy(os.path.join(builder.buildPath, MMSPlugin.plugin_name + '.vdf'), metamod_folder)
+
+# Bundled license notices; keep the original binary and VDF mapping above.
+licenses_path = os.path.join(bin_folder_path, 'licenses')
+builder.AddFolder(licenses_path)
+breakpad_source = os.path.join(builder.sourcePath, 'breakpad', 'src')
+for source, name in [
+  (os.path.join(builder.sourcePath, 'LICENSE'), 'AcceleratorLocal-LICENSE'),
+  (os.path.join(breakpad_source, 'LICENSE'), 'Breakpad-LICENSE'),
+  (os.path.join(breakpad_source, 'src', 'third_party', 'lss', 'LICENSE'), 'LSS-LICENSE'),
+  (os.path.join(breakpad_source, 'src', 'third_party', 'libdisasm', 'LICENSE'), 'libdisasm-LICENSE'),
+  (os.path.join(breakpad_source, 'src', 'third_party', 'libdisasm', 'README.breakpad'), 'libdisasm-README'),
+]:
+  builder.AddCopy(source, os.path.join(licenses_path, name))

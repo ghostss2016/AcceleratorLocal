@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import re
 import tempfile
+from types import SimpleNamespace
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -101,17 +102,83 @@ class Api18Migration(unittest.TestCase):
     def test_existing_native_abi_and_package_are_not_fabricated(self):
         expected = {
             'CMiniDumpComment.hpp': '19167e182cef528a6d91555d5c2fec49f2fce7529ad0c2dd78b0e23ce7dfaab7',
-            'PackageScript': '1bfe397f5cdf89c3b46e68b5018f55476a696e996e29ccc4f96e09117328957d',
+            'LICENSE': '3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986',
         }
         for name, digest in expected.items():
             with self.subTest(file=name):
                 self.assertEqual(hashlib.sha256((ROOT / name).read_bytes()).hexdigest(), digest)
+        # The original complete package logic is unchanged; license notices
+        # are appended, without replacing the original binary or VDF mapping.
+        package = (ROOT / 'PackageScript').read_bytes()
+        original, marker, _ = package.partition(b'\n# Bundled license notices;')
+        self.assertTrue(marker)
+        self.assertEqual(hashlib.sha256(original).hexdigest(),
+                         '1bfe397f5cdf89c3b46e68b5018f55476a696e996e29ccc4f96e09117328957d')
         script = (ROOT / 'AMBuildScript').read_text()
         self.assertIn("self.plugin_name = 'accelerator_local'", script)
         self.assertIn("self.plugin_alias = 'accelerator_local'", script)
         self.assertIn("os.path.join(context.currentSourcePath, '..', 'SchemaEntity')", script)
         self.assertIn("os.path.join(self.mms_root, 'third_party', 'khook', 'include')", script)
         self.assertIn("'breakpad', 'build', 'src', 'client', 'linux', 'libbreakpad_client.a'", script)
+
+    def test_production_package_preserves_vdf_and_unique_license_destinations(self):
+        # Execute PackageScript itself. AMBuild graph insertion is the only
+        # substituted boundary; no compiler or synthetic ELF is needed.
+        class PackageBoundary:
+            sourcePath = str(ROOT)
+
+            def __init__(self, directory):
+                self.buildPath = directory
+                self.folders = set()
+                self.copies = {}
+
+            def SetBuildFolder(self, name):
+                self.packageFolder = name
+
+            def AddFolder(self, path):
+                self.folders.add(path)
+                return SimpleNamespace(path=path)
+
+            def AddCopy(self, source, destination):
+                if not isinstance(destination, str):
+                    destination = os.path.join(destination.path, Path(source).name)
+                if destination in self.copies:
+                    raise AssertionError('duplicate package output: ' + destination)
+                self.copies[destination] = str(source)
+
+        with tempfile.TemporaryDirectory(prefix='accelerator-package-fixture-') as temporary:
+            boundary = PackageBoundary(temporary)
+            target = SimpleNamespace(arch='x86_64')
+            plugin = SimpleNamespace(plugin_name='accelerator_local', plugin_alias='accelerator_local',
+                                     all_targets=[SimpleNamespace(target=target)],
+                                     binaries=[SimpleNamespace(target=target,
+                                                               binary=os.path.join(temporary, 'accelerator_local.so'),
+                                                               debug=None)])
+            exec(compile((ROOT / 'PackageScript').read_text(), 'PackageScript', 'exec'),
+                 {'builder': boundary, 'MMSPlugin': plugin})
+            self.assertEqual(boundary.packageFolder, 'package')
+            self.assertEqual(set(boundary.copies), {
+                'addons/accelerator_local/accelerator_local.so',
+                'addons/metamod/accelerator_local.vdf',
+                'addons/accelerator_local/licenses/AcceleratorLocal-LICENSE',
+                'addons/accelerator_local/licenses/Breakpad-LICENSE',
+                'addons/accelerator_local/licenses/LSS-LICENSE',
+                'addons/accelerator_local/licenses/libdisasm-LICENSE',
+                'addons/accelerator_local/licenses/libdisasm-README',
+            })
+            vdf = Path(boundary.copies['addons/metamod/accelerator_local.vdf']).read_text()
+            self.assertEqual(dict(re.findall(r'"(alias|file)"\s+"([^"]+)"', vdf)), {
+                'alias': 'accelerator_local', 'file': 'addons/accelerator_local/accelerator_local',
+            })
+            expected_sources = {
+                'AcceleratorLocal-LICENSE': ROOT / 'LICENSE',
+                'Breakpad-LICENSE': ROOT / 'breakpad/src/LICENSE',
+                'LSS-LICENSE': ROOT / 'breakpad/src/src/third_party/lss/LICENSE',
+                'libdisasm-LICENSE': ROOT / 'breakpad/src/src/third_party/libdisasm/LICENSE',
+                'libdisasm-README': ROOT / 'breakpad/src/src/third_party/libdisasm/README.breakpad',
+            }
+            for name, source in expected_sources.items():
+                self.assertEqual(boundary.copies['addons/accelerator_local/licenses/' + name], str(source))
 
     def test_build_recipes_parse_without_building(self):
         for name in ('configure.py', 'AMBuildScript', 'AMBuilder', 'PackageScript'):
