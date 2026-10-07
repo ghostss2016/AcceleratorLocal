@@ -114,6 +114,17 @@ def ResolveEnvPath(env, folder):
 def Normalize(path):	
   return os.path.abspath(os.path.normpath(path))
 
+def ConfigureBreakpadHeaders(compiler, source_path):
+  config_dir = os.path.join(source_path, 'breakpad', 'build', 'src')
+  config = os.path.join(config_dir, 'config.h')
+  if not os.path.isfile(config):
+    raise Exception('Missing upstream-configured Breakpad header: ' + config)
+  # Match upstream DEFS/DEFAULT_INCLUDES for the retained common .cc files.
+  # Their feature checks must use configure's real results, not guessed values.
+  compiler.cxxincludes.insert(0, config_dir)
+  compiler.defines += ['HAVE_CONFIG_H']
+  compiler.cxxincludes += [os.path.join(source_path, 'breakpad', 'src', 'src')]
+
 def ResolveTier1Library(sdk_name, lib_folder, arch):
   archive = 'tier1.a' if sdk_name in ['sdk2013', 'bms', 'pvkii'] or arch == 'x86_64' else 'tier1_i486.a'
   path = os.path.join(lib_folder, archive)
@@ -442,7 +453,7 @@ class MMSPluginConfig(object):
     for path in paths:
       compiler.cxxincludes += [os.path.join(sdk.path, *path)]
 
-    compiler.cxxincludes += [os.path.join(context.currentSourcePath, 'breakpad', 'src', 'src')]
+    ConfigureBreakpadHeaders(compiler, context.currentSourcePath)
     compiler.linkflags.append(os.path.join(context.currentSourcePath, 'breakpad', 'build', 'src', 'client', 'linux', 'libbreakpad_client.a'))
     compiler.linkflags.append(os.path.join(context.currentSourcePath, 'breakpad', 'build', 'src', 'libbreakpad.a'))
     compiler.linkflags.append(os.path.join(context.currentSourcePath, 'breakpad', 'build', 'src', 'third_party', 'libdisasm', 'libdisasm.a'))

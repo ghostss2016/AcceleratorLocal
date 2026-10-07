@@ -217,6 +217,33 @@ class Api18Migration(unittest.TestCase):
         self.assertIn('if tier1 is not None:\n        compiler.postlink += [tier1]', script)
         self.assertIn("compiler.postlink += [os.path.join(lib_folder, 'interfaces.a')]", script)
 
+    def test_retained_breakpad_sources_use_real_upstream_config(self):
+        # Execute the actual recipe helper without compiling. A configured
+        # filesystem and compiler graph are the substituted I/O boundary.
+        script = (ROOT / 'AMBuildScript').read_text()
+        tree = ast.parse(script, filename='AMBuildScript')
+        helper = next(node for node in tree.body
+                      if isinstance(node, ast.FunctionDef) and node.name == 'ConfigureBreakpadHeaders')
+        scope = {'os': os}
+        exec(compile(ast.Module(body=[helper], type_ignores=[]),
+                     'AMBuildScript:ConfigureBreakpadHeaders', 'exec'), scope)
+        configure = scope['ConfigureBreakpadHeaders']
+        with tempfile.TemporaryDirectory(prefix='accelerator-breakpad-config-fixture-') as temporary:
+            compiler = SimpleNamespace(cxxincludes=['sdk/public'], defines=['EXISTING'])
+            with self.assertRaisesRegex(Exception, 'Missing upstream-configured Breakpad header'):
+                configure(compiler, temporary)
+            self.assertEqual(compiler.cxxincludes, ['sdk/public'])
+            self.assertEqual(compiler.defines, ['EXISTING'])
+            config_dir = Path(temporary) / 'breakpad/build/src'
+            config_dir.mkdir(parents=True)
+            (config_dir / 'config.h').touch()
+            configure(compiler, temporary)
+            self.assertEqual(compiler.cxxincludes, [str(config_dir), 'sdk/public',
+                                                   str(Path(temporary) / 'breakpad/src/src')])
+            self.assertEqual(compiler.defines, ['EXISTING', 'HAVE_CONFIG_H'])
+        self.assertIn('ConfigureBreakpadHeaders(compiler, context.currentSourcePath)', script)
+        self.assertNotRegex(script, r'\b(?:HAVE_A_OUT_H|N_UNDF)\s*=')
+
     def test_native_harness_imports_production_logic(self):
         test = (ROOT / 'tests/accelerator_runtime_test.cpp').read_text()
         self.assertIn('#include "../accelerator_runtime.h"', test)
