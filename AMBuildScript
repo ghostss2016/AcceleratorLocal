@@ -114,6 +114,18 @@ def ResolveEnvPath(env, folder):
 def Normalize(path):	
   return os.path.abspath(os.path.normpath(path))
 
+def ResolveTier1Library(sdk_name, lib_folder, arch):
+  archive = 'tier1.a' if sdk_name in ['sdk2013', 'bms', 'pvkii'] or arch == 'x86_64' else 'tier1_i486.a'
+  path = os.path.join(lib_folder, archive)
+  if os.path.isfile(path):
+    return path
+  # Current CS2 SDK removed tier1.a and its old sources. AcceleratorLocal uses
+  # InterfaceReg/CreateInterface from interfaces.a and CommandLine from tier0;
+  # it does not instantiate/call the old tier1 app-system/container helpers.
+  if sdk_name == 'cs2':
+    return None
+  raise Exception('Required SDK library is missing: {}'.format(path))
+
 class MMSPluginConfig(object):
   def __init__(self):
     self.sdks = {}
@@ -466,13 +478,11 @@ class MMSPluginConfig(object):
         lib_folder = os.path.join(sdk.path, 'lib', 'mac')
 
     if compiler.target.platform in ['linux', 'mac']:
-      if sdk.name in ['sdk2013', 'bms', 'pvkii'] or compiler.target.arch == 'x86_64':
-        tier1 = os.path.join(lib_folder, 'tier1.a')
-      else:
-        tier1 = os.path.join(lib_folder, 'tier1_i486.a')
+      tier1 = ResolveTier1Library(sdk.name, lib_folder, compiler.target.arch)
       if sdk.name == 'mock' and compiler.target.platform == 'linux':
         compiler.linkflags += ['-Wl,-z,origin']
-      compiler.postlink += [tier1]
+      if tier1 is not None:
+        compiler.postlink += [tier1]
 
       if sdk.name in ['blade', 'insurgency', 'doi', 'csgo', 'cs2', 'dota']:
         if compiler.target.arch == 'x86_64':

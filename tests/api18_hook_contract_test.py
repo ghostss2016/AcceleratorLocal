@@ -6,8 +6,10 @@ production accelerator_runtime.h; central CI owns compilation and execution.
 """
 import ast
 import hashlib
+import os
 from pathlib import Path
 import re
+import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -119,6 +121,34 @@ class Api18Migration(unittest.TestCase):
         for workflow in (ROOT / '.github/workflows').glob('*'):
             if workflow.suffix in ('.yml', '.yaml'):
                 self.assertRegex(workflow.read_text(), r'(?m)^enabled:\s*false\s*$')
+
+    def test_existing_recipe_handles_sdk_without_tier1_archive(self):
+        # Execute the production recipe's standalone resolver, not AMBuild or
+        # a copied implementation. The filesystem is the substituted boundary.
+        script = (ROOT / 'AMBuildScript').read_text()
+        tree = ast.parse(script, filename='AMBuildScript')
+        resolver = next(node for node in tree.body
+                        if isinstance(node, ast.FunctionDef) and node.name == 'ResolveTier1Library')
+        scope = {'os': os}
+        module = ast.Module(body=[resolver], type_ignores=[])
+        exec(compile(module, 'AMBuildScript:ResolveTier1Library', 'exec'), scope)
+        resolve = scope['ResolveTier1Library']
+        with tempfile.TemporaryDirectory(prefix='accelerator-sdk-fixture-') as temporary:
+            folder = Path(temporary)
+            self.assertIsNone(resolve('cs2', str(folder), 'x86_64'))
+            with self.assertRaisesRegex(Exception, 'Required SDK library is missing'):
+                resolve('csgo', str(folder), 'x86_64')
+            (folder / 'tier1.a').touch()
+            self.assertEqual(resolve('cs2', str(folder), 'x86_64'), str(folder / 'tier1.a'))
+            self.assertEqual(resolve('csgo', str(folder), 'x86_64'), str(folder / 'tier1.a'))
+            self.assertEqual(resolve('sdk2013', str(folder), 'x86'), str(folder / 'tier1.a'))
+            with self.assertRaisesRegex(Exception, 'tier1_i486.a'):
+                resolve('csgo', str(folder), 'x86')
+            (folder / 'tier1_i486.a').touch()
+            self.assertEqual(resolve('csgo', str(folder), 'x86'), str(folder / 'tier1_i486.a'))
+        self.assertIn('tier1 = ResolveTier1Library(sdk.name, lib_folder, compiler.target.arch)', script)
+        self.assertIn('if tier1 is not None:\n        compiler.postlink += [tier1]', script)
+        self.assertIn("compiler.postlink += [os.path.join(lib_folder, 'interfaces.a')]", script)
 
     def test_native_harness_imports_production_logic(self):
         test = (ROOT / 'tests/accelerator_runtime_test.cpp').read_text()
