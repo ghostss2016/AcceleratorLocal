@@ -14,6 +14,7 @@
  */
 
 #include "accelerator_local.h"
+#include "accelerator_breakpad_compat.h"
 #include "CMiniDumpComment.hpp"
 
 #include "client/linux/handler/exception_handler.h"
@@ -28,11 +29,11 @@
 #include <unistd.h>
 #include <limits>
 #include <new>
+#include <string>
 
 #include "common/path_helper.h"
-#include "common/scoped_ptr.h"
-#include "common/using_std_string.h"
 #include "google_breakpad/processor/basic_source_line_resolver.h"
+#include "google_breakpad/processor/minidump.h"
 #include "google_breakpad/processor/minidump_processor.h"
 #include "google_breakpad/processor/process_state.h"
 #include "processor/simple_symbol_supplier.h"

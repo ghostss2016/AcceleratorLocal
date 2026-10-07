@@ -1,10 +1,12 @@
 // Native regression for production logic. Compile/run only in central cs2-ci
 // on .100; hook registrations and signal I/O are the substituted boundaries.
 #include "../accelerator_runtime.h"
+#include "../accelerator_breakpad_compat.h"
 #include <cassert>
 #include <iostream>
 #include <string>
 #include <thread>
+#include <type_traits>
 #include <vector>
 
 namespace {
@@ -162,6 +164,28 @@ void ProcessStateOutput() {
     assert(calls == 4);
 }
 
+void OriginalSupplierOwnership() {
+    // Exercise the production compatibility type, not a copied owner class.
+    struct SupplierBoundary {
+        unsigned& destroyed;
+        explicit SupplierBoundary(unsigned& count) : destroyed(count) {}
+        ~SupplierBoundary() { ++destroyed; }
+    };
+    static_assert(std::is_same_v<google_breakpad::scoped_ptr<SupplierBoundary>,
+                                 std::unique_ptr<SupplierBoundary>>);
+    unsigned destroyed = 0;
+    {
+        google_breakpad::scoped_ptr<SupplierBoundary> supplier;
+        assert(supplier.get() == nullptr); // Original writer's default state.
+        supplier.reset(new SupplierBoundary(destroyed));
+        auto* borrowed = supplier.get();
+        google_breakpad::scoped_ptr<SupplierBoundary> moved(std::move(supplier));
+        assert(supplier.get() == nullptr && moved.get() == borrowed);
+        assert(destroyed == 0);
+    }
+    assert(destroyed == 1);
+}
+
 void OwnedSignal(int, siginfo_t*, void*) {}
 void ForeignSignal(int, siginfo_t*, void*) {}
 
@@ -273,6 +297,7 @@ int main() {
     HooksAndCallbacks();
     Metadata();
     ProcessStateOutput();
+    OriginalSupplierOwnership();
     Signals();
     std::cout << "accelerator_runtime_test: all checks passed\n";
 }

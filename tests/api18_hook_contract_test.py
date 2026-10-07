@@ -94,10 +94,44 @@ class Api18Migration(unittest.TestCase):
         adapter = body(source, 'PrintProcessState')
         self.assertIn('accelerator::PrintOriginalProcessState(', adapter)
         self.assertIn('&google_breakpad::PrintProcessState', adapter)
-        self.assertIn('#include "common/scoped_ptr.h"', source)
+        self.assertIn('#include "accelerator_breakpad_compat.h"', source)
         test = (ROOT / 'tests/accelerator_runtime_test.cpp').read_text()
         self.assertIn('accelerator::PrintOriginalProcessState(state, contents, requestingOnly, &resolver', test)
         self.assertIn('assert(!dumpStackPointers && threadIndex == -1)', test)
+
+    def test_all_direct_breakpad_headers_exist_in_verified_pinned_source(self):
+        # Inventory checked against the actual unpacked official Breakpad
+        # 6598c9c33fc02da7805401f3b0f1a733e6a24071 on .100. When dependency
+        # sources are present (central CI), also inspect their real files.
+        expected = {
+            'client/linux/handler/exception_handler.h',
+            'common/linux/linux_libc_support.h',
+            'third_party/lss/linux_syscall_support.h',
+            'common/path_helper.h',
+            'google_breakpad/processor/basic_source_line_resolver.h',
+            'google_breakpad/processor/minidump.h',
+            'google_breakpad/processor/minidump_processor.h',
+            'google_breakpad/processor/process_state.h',
+            'processor/simple_symbol_supplier.h',
+            'processor/stackwalk_common.h',
+            'google_breakpad/processor/call_stack.h',
+            'google_breakpad/processor/stack_frame.h',
+            'processor/pathname_stripper.h',
+        }
+        source = (ROOT / 'accelerator_local.cpp').read_text()
+        includes = set(re.findall(r'^#include\s*[<"]([^">]+)[">]', source, re.M))
+        direct = {name for name in includes if name.startswith(
+            ('client/', 'common/', 'third_party/', 'google_breakpad/', 'processor/'))}
+        self.assertEqual(direct, expected)
+        self.assertIn('string', includes)
+        compat = (ROOT / 'accelerator_breakpad_compat.h').read_text()
+        self.assertIn('using scoped_ptr = std::unique_ptr<T>;', compat)
+        self.assertNotIn('common/using_std_string.h', source + compat)
+        dependency = ROOT / 'breakpad/src/src'
+        if dependency.exists():
+            for name in direct:
+                with self.subTest(header=name):
+                    self.assertTrue((dependency / name).is_file(), 'Missing pinned Breakpad header: ' + name)
 
     def test_existing_native_abi_and_package_are_not_fabricated(self):
         expected = {
@@ -247,6 +281,8 @@ class Api18Migration(unittest.TestCase):
     def test_native_harness_imports_production_logic(self):
         test = (ROOT / 'tests/accelerator_runtime_test.cpp').read_text()
         self.assertIn('#include "../accelerator_runtime.h"', test)
+        self.assertIn('#include "../accelerator_breakpad_compat.h"', test)
+        self.assertIn('OriginalSupplierOwnership();', body(test, 'main'))
         self.assertIn('accelerator::OwnedHooks<BoundaryHook, BoundaryHook>', test)
         self.assertIn('accelerator::SignalMonitor monitor', test)
         self.assertIn('accelerator::CrashMetadata metadata', test)
