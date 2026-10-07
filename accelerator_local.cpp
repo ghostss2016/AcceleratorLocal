@@ -27,8 +27,10 @@
 #include <dirent.h>
 #include <unistd.h>
 #include <limits>
+#include <new>
 
 #include "common/path_helper.h"
+#include "common/scoped_ptr.h"
 #include "common/using_std_string.h"
 #include "google_breakpad/processor/basic_source_line_resolver.h"
 #include "google_breakpad/processor/minidump_processor.h"
@@ -42,24 +44,27 @@
 AcceleratorLocal g_AcceleratorLocal;
 PLUGIN_EXPOSE(AcceleratorLocal, g_AcceleratorLocal);
 
-char crashMap[256];
-char crashGamePath[512];
-char crashCommandLine[1024];
-char dumpStoragePath[512];
-
-google_breakpad::ExceptionHandler* exceptionHandler = nullptr;
+accelerator::CrashMetadata g_CrashMetadata;
+accelerator::CallbackActivity g_CallbackActivity;
+auto& crashMap = g_CrashMetadata.map;
+auto& crashGamePath = g_CrashMetadata.gamePath;
+auto& crashCommandLine = g_CrashMetadata.commandLine;
+auto& dumpStoragePath = g_CrashMetadata.dumpPath;
 CMiniDumpComment g_MiniDumpComment(95000);
 
-void (*SignalHandler)(int, siginfo_t*, void*);
-const int kExceptionSignals[] = {SIGSEGV, SIGABRT, SIGFPE, SIGILL, SIGBUS};
-const int kNumHandledSignals = std::size(kExceptionSignals);
-
-class GameSessionConfiguration_t { };
-SH_DECL_HOOK3_void(IServerGameDLL, GameFrame, SH_NOATTRIB, 0, bool, bool, bool);
-SH_DECL_HOOK3_void(INetworkServerService, StartupServer, SH_NOATTRIB, 0, const GameSessionConfiguration_t&, ISource2WorldSession*, const char*);
+// Compatibility for the pinned upstream Breakpad API. Retain the original
+// four-argument writer call and its full stack/all-thread output semantics.
+static void PrintProcessState(const google_breakpad::ProcessState& state,
+	bool stackContents, bool requestingThreadOnly,
+	google_breakpad::SourceLineResolverInterface* resolver)
+{
+	accelerator::PrintOriginalProcessState(state, stackContents, requestingThreadOnly,
+		resolver, &google_breakpad::PrintProcessState);
+}
 
 static bool dumpCallback(const google_breakpad::MinidumpDescriptor& descriptor, void* context, bool succeeded)
 {
+	accelerator::CallbackActivity::Scope callback(g_CallbackActivity);
 	if (succeeded)
 		sys_write(STDOUT_FILENO, "Wrote minidump to: ", 19);
 	else
@@ -191,12 +196,29 @@ static bool dumpCallback(const google_breakpad::MinidumpDescriptor& descriptor, 
 bool AcceleratorLocal::Load(PluginId id, ISmmAPI* ismm, char* error, size_t maxlen, bool late)
 {
 	PLUGIN_SAVEVARS();
-	
-	GET_V_IFACE_CURRENT(GetServerFactory, g_pSource2Server, ISource2Server, SOURCE2SERVER_INTERFACE_VERSION);
-	GET_V_IFACE_CURRENT(GetEngineFactory, g_pNetworkServerService, INetworkServerService, NETWORKSERVERSERVICE_INTERFACE_VERSION);
-	
-	strncpy(crashGamePath, ismm->GetBaseDir(), sizeof(crashGamePath) - 1);
+	if (exceptionHandler_ || !hooks_.Empty())
+	{
+		ismm->Format(error, maxlen, "AcceleratorLocal is already initialized");
+		return false;
+	}
+	if (!KHook::__exported__khook)
+	{
+		ismm->Format(error, maxlen, "AcceleratorLocal requires the MetaMod API18 KHook provider");
+		return false;
+	}
+	GET_V_IFACE_CURRENT(GetServerFactory, server_, IServerGameDLL, INTERFACEVERSION_SERVERGAMEDLL);
+	GET_V_IFACE_CURRENT(GetEngineFactory, networkService_, INetworkServerService, NETWORKSERVERSERVICE_INTERFACE_VERSION);
+
+	g_CrashMetadata.Reset();
+	const char* baseDir = ismm->GetBaseDir();
+	if (!baseDir || strlen(baseDir) + strlen("/addons/accelerator_local/dumps") >= sizeof(dumpStoragePath))
+	{
+		ismm->Format(error, maxlen, "AcceleratorLocal dump directory exceeds the metadata path limit");
+		return false;
+	}
+	accelerator::CopyMetadata(crashGamePath, baseDir);
 	ismm->Format(dumpStoragePath, sizeof(dumpStoragePath), "%s/addons/accelerator_local/dumps", ismm->GetBaseDir());
+	accelerator::CopyMetadata(crashCommandLine, CommandLine() ? CommandLine()->GetCmdLine() : nullptr);
 	
 	struct stat st = {0};
 	if (stat(dumpStoragePath, &st) == -1)
@@ -207,73 +229,97 @@ bool AcceleratorLocal::Load(PluginId id, ISmmAPI* ismm, char* error, size_t maxl
 			return false;
 		}
 	}
+	else if (!S_ISDIR(st.st_mode))
+	{
+		ismm->Format(error, maxlen, "AcceleratorLocal dump path is not a directory: %s", dumpStoragePath);
+		return false;
+	}
 	else
 		chmod(dumpStoragePath, 0777);
-	
+
+	const auto readSignal = [](int signal, struct sigaction& action) { return sigaction(signal, nullptr, &action) == 0; };
+	if (!signals_.Prepare(readSignal))
+	{
+		ismm->Format(error, maxlen, "AcceleratorLocal could not read the existing signal handlers");
+		return false;
+	}
+
+	// Hook registration precedes Breakpad installation: a rejected registration
+	// leaves no signal callback in a library which MetaMod is about to close.
+	if (!hooks_.Install(
+		std::make_unique<FrameHook>(&IServerGameDLL::GameFrame, this, nullptr, &AcceleratorLocal::Api18GameFrame),
+		std::make_unique<StartupHook>(&INetworkServerService::StartupServer, this, nullptr, &AcceleratorLocal::Api18StartupServer),
+		server_, networkService_))
+	{
+		ismm->Format(error, maxlen, "AcceleratorLocal API18 hook registration rejected");
+		return false;
+	}
+
 	google_breakpad::MinidumpDescriptor descriptor(dumpStoragePath);
-	exceptionHandler = new google_breakpad::ExceptionHandler(descriptor, NULL, dumpCallback, NULL, true, -1);
-
-	struct sigaction oact;
-	sigaction(SIGSEGV, NULL, &oact);
-	SignalHandler = oact.sa_sigaction;
-
-	SH_ADD_HOOK(IServerGameDLL, GameFrame, g_pSource2Server, SH_MEMBER(this, &AcceleratorLocal::GameFrame), true);
-	SH_ADD_HOOK(INetworkServerService, StartupServer, g_pNetworkServerService, SH_MEMBER(this, &AcceleratorLocal::StartupServer), true);
-
-	strncpy(crashCommandLine, CommandLine()->GetCmdLine(), sizeof(crashCommandLine) - 1);
+	exceptionHandler_ = new (std::nothrow) google_breakpad::ExceptionHandler(descriptor, nullptr, dumpCallback, nullptr, true, -1);
+	if (!exceptionHandler_ || !signals_.Capture(readSignal))
+	{
+		hooks_.RollbackInitialization();
+		delete exceptionHandler_;
+		exceptionHandler_ = nullptr;
+		signals_.Reset();
+		ismm->Format(error, maxlen, "AcceleratorLocal could not establish its Breakpad signal handlers");
+		return false;
+	}
 
 	if (late)
-		StartupServer({}, nullptr, g_pNetworkServerService->GetIGameServer()->GetMapName());
+	{
+		auto* gameServer = networkService_->GetIGameServer();
+		StartupServer(gameServer ? gameServer->GetMapName() : nullptr);
+	}
 	
 	return true;
 }
 
 bool AcceleratorLocal::Unload(char* error, size_t maxlen)
 {
-	SH_REMOVE_HOOK(IServerGameDLL, GameFrame, g_pSource2Server, SH_MEMBER(this, &AcceleratorLocal::GameFrame), true);
-	SH_REMOVE_HOOK(INetworkServerService, StartupServer, g_pNetworkServerService, SH_MEMBER(this, &AcceleratorLocal::StartupServer), true);
-
-	delete exceptionHandler;
-	
+	if (!hooks_.Clear(KHook::__exported__khook != nullptr, g_CallbackActivity))
+	{
+		g_SMAPI->Format(error, maxlen, "AcceleratorLocal callback is active or KHook unavailable; unload refused");
+		return false;
+	}
+	// Breakpad serializes removal with its signal-dispatch stack mutex. Destroy
+	// it only after our engine callbacks have been synchronously removed.
+	delete exceptionHandler_;
+	exceptionHandler_ = nullptr;
+	signals_.Reset();
+	server_ = nullptr;
+	networkService_ = nullptr;
+	g_CrashMetadata.Reset();
 	return true;
 }
 
-void AcceleratorLocal::GameFrame(bool simulating, bool bFirstTick, bool bLastTick)
+KHook::Return<void> AcceleratorLocal::Api18GameFrame(IServerGameDLL*, bool simulating, bool bFirstTick, bool bLastTick)
 {
-	bool weHaveBeenFuckedOver = false;
-	struct sigaction oact;
-
-	for (int i = 0; i < kNumHandledSignals; ++i)
-	{
-		sigaction(kExceptionSignals[i], NULL, &oact);
-
-		if (oact.sa_sigaction != SignalHandler)
-		{
-			weHaveBeenFuckedOver = true;
-			break;
-		}
-	}
-
-	if (!weHaveBeenFuckedOver)
-		return;
-
-	struct sigaction act;
-	memset(&act, 0, sizeof(act));
-	sigemptyset(&act.sa_mask);
-
-	for (int i = 0; i < kNumHandledSignals; ++i)
-		sigaddset(&act.sa_mask, kExceptionSignals[i]);
-
-	act.sa_sigaction = SignalHandler;
-	act.sa_flags = SA_ONSTACK | SA_SIGINFO;
-
-	for (int i = 0; i < kNumHandledSignals; ++i)
-		sigaction(kExceptionSignals[i], &act, NULL);
+	accelerator::CallbackActivity::Scope callback(g_CallbackActivity);
+	GameFrame(simulating, bFirstTick, bLastTick);
+	return {KHook::Action::Ignore};
 }
 
-void AcceleratorLocal::StartupServer(const GameSessionConfiguration_t& config, ISource2WorldSession*, const char* pszMapName)
+KHook::Return<void> AcceleratorLocal::Api18StartupServer(INetworkServerService*, const GameSessionConfiguration_t&,
+	ISource2WorldSession*, const char* mapName)
 {
-	strncpy(crashMap, pszMapName, sizeof(crashMap) - 1);
+	accelerator::CallbackActivity::Scope callback(g_CallbackActivity);
+	StartupServer(mapName);
+	return {KHook::Action::Ignore};
+}
+
+void AcceleratorLocal::GameFrame(bool, bool, bool)
+{
+	if (!exceptionHandler_) return;
+	signals_.Repair(
+		[](int signal, struct sigaction& action) { return sigaction(signal, nullptr, &action) == 0; },
+		[](int signal, const struct sigaction& action) { return sigaction(signal, &action, nullptr) == 0; });
+}
+
+void AcceleratorLocal::StartupServer(const char* mapName)
+{
+	g_CrashMetadata.Map(mapName);
 }
 
 ///////////////////////////////////////
@@ -284,7 +330,7 @@ const char* AcceleratorLocal::GetLicense()
 
 const char* AcceleratorLocal::GetVersion()
 {
-	return "1.0.4";
+	return "1.0.5-api18";
 }
 
 const char* AcceleratorLocal::GetDate()

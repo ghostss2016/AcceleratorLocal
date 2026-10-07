@@ -372,7 +372,8 @@ class MMSPluginConfig(object):
     mms_core_path = os.path.join(self.mms_root, 'core')
     compiler.cxxincludes += [
       os.path.join(mms_core_path),	
-      os.path.join(mms_core_path, 'sourcehook'),
+      os.path.join(self.mms_root, 'third_party', 'khook', 'include'),
+      os.path.join(context.currentSourcePath, '..', 'SchemaEntity'),
       os.path.join(context.currentSourcePath),
     ]
 
@@ -433,6 +434,7 @@ class MMSPluginConfig(object):
     compiler.linkflags.append(os.path.join(context.currentSourcePath, 'breakpad', 'build', 'src', 'client', 'linux', 'libbreakpad_client.a'))
     compiler.linkflags.append(os.path.join(context.currentSourcePath, 'breakpad', 'build', 'src', 'libbreakpad.a'))
     compiler.linkflags.append(os.path.join(context.currentSourcePath, 'breakpad', 'build', 'src', 'third_party', 'libdisasm', 'libdisasm.a'))
+    compiler.linkflags += ['-pthread', '-lz']
     compiler.linkflags += additional_libs
     compiler.defines += additional_defines
     compiler.cxxincludes += additional_includes

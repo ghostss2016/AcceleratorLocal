@@ -17,13 +17,22 @@
 #define _INCLUDE_METAMOD_SOURCE_STUB_PLUGIN_H_
 
 #include <ISmmPlugin.h>
+#include <eiface.h>
 #include <iserver.h>
+#include "metamod_virtual_hook.h"
+#include "accelerator_runtime.h"
+
+#if METAMOD_PLAPI_VERSION < 18
+#error "AcceleratorLocal requires the real MetaMod API18/KHook headers"
+#endif
+
+namespace google_breakpad { class ExceptionHandler; }
 
 class AcceleratorLocal final : public ISmmPlugin, public IMetamodListener
 {
 public:
-	bool Load(PluginId id, ISmmAPI* ismm, char* error, size_t maxlen, bool late);
-	bool Unload(char* error, size_t maxlen);
+	bool Load(PluginId id, ISmmAPI* ismm, char* error, size_t maxlen, bool late) override;
+	bool Unload(char* error, size_t maxlen) override;
 	
 private:
 	const char* GetAuthor();
@@ -36,8 +45,19 @@ private:
 	const char* GetLogTag();
 
 private: // Hooks
+	using FrameHook = SvarogHooks::Virtual<IServerGameDLL, void, bool, bool, bool>;
+	using StartupHook = SvarogHooks::Virtual<INetworkServerService, void,
+		const GameSessionConfiguration_t&, ISource2WorldSession*, const char*>;
+	accelerator::OwnedHooks<FrameHook, StartupHook> hooks_;
+	accelerator::SignalMonitor signals_;
+	IServerGameDLL* server_ = nullptr;
+	INetworkServerService* networkService_ = nullptr;
+	google_breakpad::ExceptionHandler* exceptionHandler_ = nullptr;
+	KHook::Return<void> Api18GameFrame(IServerGameDLL*, bool simulating, bool bFirstTick, bool bLastTick);
+	KHook::Return<void> Api18StartupServer(INetworkServerService*, const GameSessionConfiguration_t&,
+		ISource2WorldSession*, const char*);
 	void GameFrame(bool simulating, bool bFirstTick, bool bLastTick);
-	void StartupServer(const GameSessionConfiguration_t& config, ISource2WorldSession*, const char*);
+	void StartupServer(const char* mapName);
 };
 
 #endif //_INCLUDE_METAMOD_SOURCE_STUB_PLUGIN_H_
