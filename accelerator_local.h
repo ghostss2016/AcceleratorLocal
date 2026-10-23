@@ -17,8 +17,11 @@
 #define _INCLUDE_METAMOD_SOURCE_STUB_PLUGIN_H_
 
 #include <ISmmPlugin.h>
-#include <eiface.h>
-#include <iserver.h>
+#include <engine2/ivengineserver2.h>
+#include <engine2/isource2server.h>
+#include <engine2/isource2serverconfig.h>
+#include <engine2/networkgameserverbase.h>
+#include <engine2/inetworkserverservice.h>
 #include "metamod_virtual_hook.h"
 #include "accelerator_runtime.h"
 

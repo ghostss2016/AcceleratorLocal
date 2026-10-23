@@ -13,6 +13,8 @@
  * the use of this software.
  */
 
+#include <engine2/isource2server.h>
+#include <engine2/inetworkserverservice.h>
 #include "accelerator_local.h"
 #include "accelerator_breakpad_compat.h"
 #include "CMiniDumpComment.hpp"
